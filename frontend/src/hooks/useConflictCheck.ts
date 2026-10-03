@@ -25,6 +25,10 @@ function describe(a: ObsSession, b: ObsSession): ConflictItem | null {
   if (a.nightId !== b.nightId || a.telescopeId !== b.telescopeId || a.id === b.id) {
     return null;
   }
+  // 挂起 / 因云取消的排程段不占用望远镜时段
+  if (b.status === '挂起' || b.status === '因云取消') {
+    return null;
+  }
   const overlap = overlapMinutes(a.startTime, a.endTime, b.startTime, b.endTime);
   if (overlap <= 0) {
     return null;
@@ -57,7 +61,8 @@ export function useConflictCheck(): ConflictCheckApi {
         filterSlot: '',
         plannedFrames: 0,
         status: '待执行',
-        schemaVersion: 2,
+        targetVersion: 1,
+        schemaVersion: 3,
       };
       return sessions
         .filter((session) => session.id !== input.ignoreSessionId)

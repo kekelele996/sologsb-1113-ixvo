@@ -21,6 +21,7 @@ import Typography from '@mui/material/Typography';
 import FieldRow from '../components/common/FieldRow';
 import { usePersistentStore } from '../hooks/usePersistentStore';
 import { useTargetStore } from '../stores/targetStore';
+import { useSessionStore } from '../stores/sessionStore';
 import { useNightStore } from '../stores/nightStore';
 import { FILTER_NAMES, PRIORITIES, TARGET_COLOR, TARGET_TYPES, type FilterName, type ObsTarget, type Priority, type TargetType } from '../types';
 import { altitudeAt, formatMinutes, isBelowThreshold, moonConflict, visibilityWindow } from '../utils/astro';
@@ -62,6 +63,7 @@ export default function TargetsPage() {
   const addTarget = useTargetStore((s) => s.addTarget);
   const updateTarget = useTargetStore((s) => s.updateTarget);
   const removeTarget = useTargetStore((s) => s.removeTarget);
+  const invalidateForTarget = useSessionStore((s) => s.invalidateForTarget);
   const nights = useNightStore((s) => s.nights);
   const currentNightId = useNightStore((s) => s.currentNightId);
 
@@ -128,8 +130,14 @@ export default function TargetsPage() {
       return;
     }
     if (editingId) {
-      await updateTarget(editingId, form);
-      setNotice(`已更新目标 ${form.name}`);
+      const result = await updateTarget(editingId, form);
+      if (result.versionBumped) {
+        // 坐标或高度门槛变更：对引用该目标的在排程段做失效重算
+        const { revalidated, suspended } = await invalidateForTarget(result.target);
+        setNotice(`已更新目标 ${form.name}（版本 ${result.target.version}），失效重算 ${revalidated + suspended} 段：${revalidated} 段保留，${suspended} 段挂起`);
+      } else {
+        setNotice(`已更新目标 ${form.name}`);
+      }
     } else {
       await addTarget(form);
       setNotice(`已新增目标 ${form.name}`);
@@ -188,6 +196,7 @@ export default function TargetsPage() {
               <TableCell align="right">赤纬(°)</TableCell>
               <TableCell>滤镜 / 曝光</TableCell>
               <TableCell align="right">阈值(°)</TableCell>
+              <TableCell align="right">版本</TableCell>
               <TableCell>本夜可见窗口</TableCell>
               <TableCell>优先级</TableCell>
               <TableCell align="right">操作</TableCell>
@@ -218,6 +227,9 @@ export default function TargetsPage() {
                     {target.filter} / {target.exposureSec}s · 累计 {target.totalMinutes}min
                   </TableCell>
                   <TableCell align="right">{target.minAltitude}</TableCell>
+                  <TableCell align="right">
+                    <Chip size="small" variant="outlined" label={`v${target.version}`} />
+                  </TableCell>
                   <TableCell>
                     {window ? (
                       <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap">

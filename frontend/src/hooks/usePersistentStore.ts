@@ -6,7 +6,10 @@ import type { Instrument, ObsNight, ObsSession, ObsTarget, Telescope } from '../
 export const DB_NAME = 'gbobsplan-db';
 
 /** 当前数据结构版本，写入每条记录并用于升级迁移判定 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
+
+/** 升级前备份在 localStorage 的 key（升级失败时据此回滚） */
+const BACKUP_KEY = 'gbobsplan-db-upgrade-backup';
 
 class ObsPlanDB extends Dexie {
   targets!: Table<ObsTarget, string>;
@@ -55,6 +58,114 @@ class ObsPlanDB extends Dexie {
             }
           });
       });
+
+    // v3：目标数据版本化 + 排程段快照目标版本
+    // 旧数据没有目标数据版本，升级时按现用数据回填：
+    //   - 所有目标 version 回填为 1
+    //   - 所有排程段 targetVersion 回填为其目标的当前 version
+    //   - 已完成的排程段标记 reviewed（复核过的排程段照旧保留，不参与失效重算）
+    // 升级在事务内执行，中途失败抛出即回滚到升级前状态；
+    // 另在升级前把全量数据备份到 localStorage，失败时可手动恢复。
+    this.version(3)
+      .stores({
+        targets: 'id, name, catalog, type, priority, magnitude, version',
+        sessions: 'id, nightId, targetId, telescopeId, instrumentId, startTime, status, backupNightId, targetVersion, suspensionReason, reviewed',
+        telescopes: 'id, code, status',
+        instruments: 'id, model, telescopeCode, terminalType',
+        nights: 'id, date, siteName, primary, backup',
+        meta: 'key',
+      })
+      .upgrade(async (tx) => {
+        try {
+          // 升级前备份全量数据到 localStorage（事务外，供回滚用）
+          await backupAllTables();
+
+          // 回填目标数据版本：旧数据无版本，统一从 1 开始
+          await tx.table('targets').toCollection().modify((row: ObsTarget) => {
+            if (row.version === undefined || row.version === null) {
+              row.version = 1;
+            }
+          });
+
+          // 回填排程段快照目标版本：按目标编号取目标当前版本
+          const targets = (await tx.table('targets').toArray()) as ObsTarget[];
+          const targetVersionMap = new Map(targets.map((target) => [target.id, target.version]));
+          await tx
+            .table('sessions')
+            .toCollection()
+            .modify((row: ObsSession) => {
+              if (row.targetVersion === undefined || row.targetVersion === null) {
+                row.targetVersion = targetVersionMap.get(row.targetId) ?? 1;
+              }
+              // 已完成的排程段视为复核过，照旧保留
+              if (row.status === '已完成' && row.reviewed === undefined) {
+                row.reviewed = true;
+              }
+            });
+        } catch (err) {
+          // 抛出即回滚整个升级事务，数据库回到 v2 状态
+          throw err;
+        }
+      });
+  }
+}
+
+/** 升级前备份全量数据到 localStorage（回滚用） */
+async function backupAllTables(): Promise<void> {
+  const [targets, sessions, telescopes, instruments, nights] = await Promise.all([
+    db.targets.toArray(),
+    db.sessions.toArray(),
+    db.telescopes.toArray(),
+    db.instruments.toArray(),
+    db.nights.toArray(),
+  ]);
+  const backup = {
+    timestamp: new Date().toISOString(),
+    targets,
+    sessions,
+    telescopes,
+    instruments,
+    nights,
+  };
+  try {
+    localStorage.setItem(BACKUP_KEY, JSON.stringify(backup));
+  } catch {
+    // localStorage 写入失败不阻断升级（事务本身可回滚）
+  }
+}
+
+/** 从升级前备份恢复全量数据（升级失败时手动回滚用） */
+export async function rollbackUpgrade(): Promise<boolean> {
+  const raw = localStorage.getItem(BACKUP_KEY);
+  if (!raw) return false;
+  try {
+    const backup = JSON.parse(raw) as {
+      targets: ObsTarget[];
+      sessions: ObsSession[];
+      telescopes: Telescope[];
+      instruments: Instrument[];
+      nights: ObsNight[];
+    };
+    await db.transaction('rw', db.targets, db.sessions, db.telescopes, db.instruments, db.nights, async () => {
+      await Promise.all([
+        db.targets.clear(),
+        db.sessions.clear(),
+        db.telescopes.clear(),
+        db.instruments.clear(),
+        db.nights.clear(),
+      ]);
+      await Promise.all([
+        db.targets.bulkPut(backup.targets),
+        db.sessions.bulkPut(backup.sessions),
+        db.telescopes.bulkPut(backup.telescopes),
+        db.instruments.bulkPut(backup.instruments),
+        db.nights.bulkPut(backup.nights),
+      ]);
+    });
+    localStorage.removeItem(BACKUP_KEY);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -80,18 +191,18 @@ export async function deleteRow(table: TableName, id: string): Promise<void> {
 /* ------------------------------- 示例数据 ------------------------------- */
 
 const SEED_TARGETS: ObsTarget[] = [
-  { id: 'target-001', name: 'M31', catalog: 'NGC 224', raHours: 0.712, decDeg: 41.27, magnitude: 3.4, type: '星系', filter: 'L', exposureSec: 120, totalMinutes: 90, priority: 'P1', minAltitude: 25, remark: '仙女座大星系，需大视场' },
-  { id: 'target-002', name: 'M42', catalog: 'NGC 1976', raHours: 5.588, decDeg: -5.39, magnitude: 4, type: '星云', filter: 'L', exposureSec: 60, totalMinutes: 60, priority: 'P1', minAltitude: 20, remark: '猎户座大星云，核心易过曝' },
-  { id: 'target-003', name: 'M45', catalog: 'Mel 22', raHours: 3.79, decDeg: 24.11, magnitude: 1.6, type: '疏散星团', filter: '无滤镜', exposureSec: 30, totalMinutes: 30, priority: 'P2', minAltitude: 25 },
-  { id: 'target-004', name: 'NGC 7000', catalog: 'C20', raHours: 20.98, decDeg: 44.52, magnitude: 4, type: '星云', filter: 'Ha', exposureSec: 300, totalMinutes: 180, priority: 'P1', minAltitude: 35, remark: '北美洲星云，窄带优先' },
-  { id: 'target-005', name: 'NGC 869', catalog: 'C14', raHours: 2.32, decDeg: 57.13, magnitude: 4.3, type: '疏散星团', filter: 'L', exposureSec: 60, totalMinutes: 45, priority: 'P2', minAltitude: 30, remark: '英仙双星团之一' },
-  { id: 'target-006', name: 'M13', catalog: 'NGC 6205', raHours: 16.695, decDeg: 36.46, magnitude: 5.8, type: '疏散星团', filter: 'L', exposureSec: 90, totalMinutes: 60, priority: 'P2', minAltitude: 30, remark: '球状星团，暂归入星团类统计' },
-  { id: 'target-007', name: 'M51', catalog: 'NGC 5194', raHours: 13.498, decDeg: 47.2, magnitude: 8.4, type: '星系', filter: 'L', exposureSec: 180, totalMinutes: 120, priority: 'P2', minAltitude: 40, remark: '涡状星系，暗目标' },
-  { id: 'target-008', name: 'NGC 2237', catalog: 'C49', raHours: 6.52, decDeg: 4.95, magnitude: 9, type: '星云', filter: 'Ha', exposureSec: 300, totalMinutes: 150, priority: 'P2', minAltitude: 30, remark: '玫瑰星云' },
-  { id: 'target-009', name: 'M27', catalog: 'NGC 6853', raHours: 19.99, decDeg: 22.72, magnitude: 7.4, type: '星云', filter: 'OIII', exposureSec: 180, totalMinutes: 90, priority: 'P2', minAltitude: 30, remark: '哑铃星云' },
-  { id: 'target-010', name: '木星', catalog: 'Jupiter', raHours: 2.5, decDeg: 12.5, magnitude: -2.2, type: '行星', filter: '无滤镜', exposureSec: 0.02, totalMinutes: 20, priority: 'P1', minAltitude: 20, remark: '行星视频叠加' },
-  { id: 'target-011', name: '月面', catalog: 'Moon', raHours: 0, decDeg: 0, magnitude: -12.7, type: '月面', filter: '无滤镜', exposureSec: 0.005, totalMinutes: 15, priority: 'P1', minAltitude: 15, remark: '月面细节拼接' },
-  { id: 'target-012', name: 'IC 1396', catalog: 'C33', raHours: 21.65, decDeg: 57.5, magnitude: 3.5, type: '星云', filter: 'SII', exposureSec: 300, totalMinutes: 180, priority: 'P3', minAltitude: 40, remark: '象鼻星云' },
+  { id: 'target-001', name: 'M31', catalog: 'NGC 224', raHours: 0.712, decDeg: 41.27, magnitude: 3.4, type: '星系', filter: 'L', exposureSec: 120, totalMinutes: 90, priority: 'P1', minAltitude: 25, version: 1, remark: '仙女座大星系，需大视场' },
+  { id: 'target-002', name: 'M42', catalog: 'NGC 1976', raHours: 5.588, decDeg: -5.39, magnitude: 4, type: '星云', filter: 'L', exposureSec: 60, totalMinutes: 60, priority: 'P1', minAltitude: 20, version: 1, remark: '猎户座大星云，核心易过曝' },
+  { id: 'target-003', name: 'M45', catalog: 'Mel 22', raHours: 3.79, decDeg: 24.11, magnitude: 1.6, type: '疏散星团', filter: '无滤镜', exposureSec: 30, totalMinutes: 30, priority: 'P2', minAltitude: 25, version: 1 },
+  { id: 'target-004', name: 'NGC 7000', catalog: 'C20', raHours: 20.98, decDeg: 44.52, magnitude: 4, type: '星云', filter: 'Ha', exposureSec: 300, totalMinutes: 180, priority: 'P1', minAltitude: 35, version: 1, remark: '北美洲星云，窄带优先' },
+  { id: 'target-005', name: 'NGC 869', catalog: 'C14', raHours: 2.32, decDeg: 57.13, magnitude: 4.3, type: '疏散星团', filter: 'L', exposureSec: 60, totalMinutes: 45, priority: 'P2', minAltitude: 30, version: 1, remark: '英仙双星团之一' },
+  { id: 'target-006', name: 'M13', catalog: 'NGC 6205', raHours: 16.695, decDeg: 36.46, magnitude: 5.8, type: '疏散星团', filter: 'L', exposureSec: 90, totalMinutes: 60, priority: 'P2', minAltitude: 30, version: 1, remark: '球状星团，暂归入星团类统计' },
+  { id: 'target-007', name: 'M51', catalog: 'NGC 5194', raHours: 13.498, decDeg: 47.2, magnitude: 8.4, type: '星系', filter: 'L', exposureSec: 180, totalMinutes: 120, priority: 'P2', minAltitude: 40, version: 1, remark: '涡状星系，暗目标' },
+  { id: 'target-008', name: 'NGC 2237', catalog: 'C49', raHours: 6.52, decDeg: 4.95, magnitude: 9, type: '星云', filter: 'Ha', exposureSec: 300, totalMinutes: 150, priority: 'P2', minAltitude: 30, version: 1, remark: '玫瑰星云' },
+  { id: 'target-009', name: 'M27', catalog: 'NGC 6853', raHours: 19.99, decDeg: 22.72, magnitude: 7.4, type: '星云', filter: 'OIII', exposureSec: 180, totalMinutes: 90, priority: 'P2', minAltitude: 30, version: 1, remark: '哑铃星云' },
+  { id: 'target-010', name: '木星', catalog: 'Jupiter', raHours: 2.5, decDeg: 12.5, magnitude: -2.2, type: '行星', filter: '无滤镜', exposureSec: 0.02, totalMinutes: 20, priority: 'P1', minAltitude: 20, version: 1, remark: '行星视频叠加' },
+  { id: 'target-011', name: '月面', catalog: 'Moon', raHours: 0, decDeg: 0, magnitude: -12.7, type: '月面', filter: '无滤镜', exposureSec: 0.005, totalMinutes: 15, priority: 'P1', minAltitude: 15, version: 1, remark: '月面细节拼接' },
+  { id: 'target-012', name: 'IC 1396', catalog: 'C33', raHours: 21.65, decDeg: 57.5, magnitude: 3.5, type: '星云', filter: 'SII', exposureSec: 300, totalMinutes: 180, priority: 'P3', minAltitude: 40, version: 1, remark: '象鼻星云' },
 ];
 
 const SEED_NIGHTS: ObsNight[] = [
@@ -116,22 +227,22 @@ const SEED_INSTRUMENTS: Instrument[] = [
   { id: 'ins-004', model: 'Shelyak Lhires III', terminalType: '光谱仪', pixelSizeUm: 9, sensorWidthMm: 8, sensorHeightMm: 6, readNoiseE: 4, telescopeCode: 'T-03' },
 ];
 
-/** 含一处同望远镜时段冲突（s-03 与 s-04 在 T-02 上重叠）与一条因云取消已改期记录 */
+/** 首次打开（表内无数据）时写入示例数据 */
 const SEED_SESSIONS: ObsSession[] = [
-  { id: 's-01', nightId: 'night-001', targetId: 'target-001', startTime: '18:20', endTime: '19:20', telescopeId: 'tel-002', instrumentId: 'ins-001', filterSlot: 'L', plannedFrames: 40, status: '已完成', schemaVersion: SCHEMA_VERSION },
-  { id: 's-02', nightId: 'night-001', targetId: 'target-002', startTime: '19:30', endTime: '20:30', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: 'L', plannedFrames: 45, status: '已完成', schemaVersion: SCHEMA_VERSION },
-  { id: 's-03', nightId: 'night-001', targetId: 'target-004', startTime: '20:40', endTime: '22:10', telescopeId: 'tel-002', instrumentId: 'ins-001', filterSlot: 'Ha', plannedFrames: 30, status: '待执行', schemaVersion: SCHEMA_VERSION },
-  { id: 's-04', nightId: 'night-001', targetId: 'target-007', startTime: '21:30', endTime: '23:00', telescopeId: 'tel-002', instrumentId: 'ins-001', filterSlot: 'L', plannedFrames: 35, status: '待执行', schemaVersion: SCHEMA_VERSION, rescheduleReason: '与窄带目标争用 T-02，待改期' },
-  { id: 's-05', nightId: 'night-001', targetId: 'target-009', startTime: '23:10', endTime: '00:20', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: 'OIII', plannedFrames: 28, status: '待执行', schemaVersion: SCHEMA_VERSION },
-  { id: 's-06', nightId: 'night-001', targetId: 'target-008', startTime: '00:30', endTime: '02:00', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: 'Ha', plannedFrames: 30, status: '待执行', schemaVersion: SCHEMA_VERSION },
-  { id: 's-07', nightId: 'night-001', targetId: 'target-011', startTime: '02:10', endTime: '03:00', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: '无滤镜', plannedFrames: 120, status: '待执行', schemaVersion: SCHEMA_VERSION },
-  { id: 's-08', nightId: 'night-001', targetId: 'target-010', startTime: '03:10', endTime: '04:00', telescopeId: 'tel-002', instrumentId: 'ins-001', filterSlot: '无滤镜', plannedFrames: 300, status: '待执行', schemaVersion: SCHEMA_VERSION },
-  { id: 's-09', nightId: 'night-002', targetId: 'target-003', startTime: '18:30', endTime: '19:40', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: '无滤镜', plannedFrames: 40, status: '已完成', schemaVersion: SCHEMA_VERSION },
-  { id: 's-10', nightId: 'night-002', targetId: 'target-005', startTime: '19:50', endTime: '21:40', telescopeId: 'tel-002', instrumentId: 'ins-001', filterSlot: 'L', plannedFrames: 50, status: '待执行', schemaVersion: SCHEMA_VERSION },
-  { id: 's-11', nightId: 'night-002', targetId: 'target-004', startTime: '21:50', endTime: '23:30', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: 'Ha', plannedFrames: 30, status: '因云取消', schemaVersion: SCHEMA_VERSION, rescheduleReason: '夜间云量转多云，目标被云遮挡，改期至备用夜', backupNightId: 'night-003' },
-  { id: 's-12', nightId: 'night-002', targetId: 'target-012', startTime: '23:40', endTime: '01:00', telescopeId: 'tel-002', instrumentId: 'ins-001', filterSlot: 'SII', plannedFrames: 30, status: '待执行', schemaVersion: SCHEMA_VERSION, rescheduleReason: '目标地平高度偏低，视情况顺延' },
-  { id: 's-13', nightId: 'night-002', targetId: 'target-010', startTime: '01:10', endTime: '02:00', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: '无滤镜', plannedFrames: 240, status: '待执行', schemaVersion: SCHEMA_VERSION },
-  { id: 's-14', nightId: 'night-002', targetId: 'target-001', startTime: '02:10', endTime: '03:10', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: 'L', plannedFrames: 30, status: '待执行', schemaVersion: SCHEMA_VERSION },
+  { id: 's-01', nightId: 'night-001', targetId: 'target-001', startTime: '18:20', endTime: '19:20', telescopeId: 'tel-002', instrumentId: 'ins-001', filterSlot: 'L', plannedFrames: 40, status: '已完成', targetVersion: 1, reviewed: true, schemaVersion: SCHEMA_VERSION },
+  { id: 's-02', nightId: 'night-001', targetId: 'target-002', startTime: '19:30', endTime: '20:30', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: 'L', plannedFrames: 45, status: '已完成', targetVersion: 1, reviewed: true, schemaVersion: SCHEMA_VERSION },
+  { id: 's-03', nightId: 'night-001', targetId: 'target-004', startTime: '20:40', endTime: '22:10', telescopeId: 'tel-002', instrumentId: 'ins-001', filterSlot: 'Ha', plannedFrames: 30, status: '待执行', targetVersion: 1, schemaVersion: SCHEMA_VERSION },
+  { id: 's-04', nightId: 'night-001', targetId: 'target-007', startTime: '21:30', endTime: '23:00', telescopeId: 'tel-002', instrumentId: 'ins-001', filterSlot: 'L', plannedFrames: 35, status: '待执行', targetVersion: 1, schemaVersion: SCHEMA_VERSION, rescheduleReason: '与窄带目标争用 T-02，待改期' },
+  { id: 's-05', nightId: 'night-001', targetId: 'target-009', startTime: '23:10', endTime: '00:20', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: 'OIII', plannedFrames: 28, status: '待执行', targetVersion: 1, schemaVersion: SCHEMA_VERSION },
+  { id: 's-06', nightId: 'night-001', targetId: 'target-008', startTime: '00:30', endTime: '02:00', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: 'Ha', plannedFrames: 30, status: '待执行', targetVersion: 1, schemaVersion: SCHEMA_VERSION },
+  { id: 's-07', nightId: 'night-001', targetId: 'target-011', startTime: '02:10', endTime: '03:00', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: '无滤镜', plannedFrames: 120, status: '待执行', targetVersion: 1, schemaVersion: SCHEMA_VERSION },
+  { id: 's-08', nightId: 'night-001', targetId: 'target-010', startTime: '03:10', endTime: '04:00', telescopeId: 'tel-002', instrumentId: 'ins-001', filterSlot: '无滤镜', plannedFrames: 300, status: '待执行', targetVersion: 1, schemaVersion: SCHEMA_VERSION },
+  { id: 's-09', nightId: 'night-002', targetId: 'target-003', startTime: '18:30', endTime: '19:40', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: '无滤镜', plannedFrames: 40, status: '已完成', targetVersion: 1, reviewed: true, schemaVersion: SCHEMA_VERSION },
+  { id: 's-10', nightId: 'night-002', targetId: 'target-005', startTime: '19:50', endTime: '21:40', telescopeId: 'tel-002', instrumentId: 'ins-001', filterSlot: 'L', plannedFrames: 50, status: '待执行', targetVersion: 1, schemaVersion: SCHEMA_VERSION },
+  { id: 's-11', nightId: 'night-002', targetId: 'target-004', startTime: '21:50', endTime: '23:30', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: 'Ha', plannedFrames: 30, status: '因云取消', targetVersion: 1, schemaVersion: SCHEMA_VERSION, rescheduleReason: '夜间云量转多云，目标被云遮挡，改期至备用夜', backupNightId: 'night-003' },
+  { id: 's-12', nightId: 'night-002', targetId: 'target-012', startTime: '23:40', endTime: '01:00', telescopeId: 'tel-002', instrumentId: 'ins-001', filterSlot: 'SII', plannedFrames: 30, status: '待执行', targetVersion: 1, schemaVersion: SCHEMA_VERSION, rescheduleReason: '目标地平高度偏低，视情况顺延' },
+  { id: 's-13', nightId: 'night-002', targetId: 'target-010', startTime: '01:10', endTime: '02:00', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: '无滤镜', plannedFrames: 240, status: '待执行', targetVersion: 1, schemaVersion: SCHEMA_VERSION },
+  { id: 's-14', nightId: 'night-002', targetId: 'target-001', startTime: '02:10', endTime: '03:10', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: 'L', plannedFrames: 30, status: '待执行', targetVersion: 1, schemaVersion: SCHEMA_VERSION },
 ];
 
 /** 首次打开（表内无数据）时写入示例数据 */

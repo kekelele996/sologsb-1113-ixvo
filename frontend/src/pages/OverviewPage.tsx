@@ -82,6 +82,10 @@ export default function OverviewPage() {
     () => Array.from(new Set(nightSessions.map((session) => session.targetId))).filter((id) => altitudes.get(id)?.below),
     [nightSessions, altitudes],
   );
+  const suspendedSessions = useMemo(
+    () => nightSessions.filter((session) => session.status === '挂起'),
+    [nightSessions],
+  );
   const moonConflicts = useMemo(
     () =>
       Array.from(new Set(nightSessions.map((session) => session.targetId)))
@@ -157,6 +161,16 @@ export default function OverviewPage() {
             </Typography>
           </CardContent>
         </Card>
+        <Card variant="outlined">
+          <CardContent>
+            <Typography variant="caption" color="text.secondary">
+              挂起待处理
+            </Typography>
+            <Typography variant="h5" color={suspendedSessions.length ? 'warning.main' : 'success.main'}>
+              {suspendedSessions.length}
+            </Typography>
+          </CardContent>
+        </Card>
       </Box>
 
       {conflicts.length > 0 ? (
@@ -181,6 +195,21 @@ export default function OverviewPage() {
                 {target.name}：评估高度角 {altitude?.altitude}°，阈值 {target.minAltitude}°
               </div>
             ) : null;
+          })}
+        </Alert>
+      ) : null}
+
+      {suspendedSessions.length > 0 ? (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          <AlertTitle>{suspendedSessions.length} 段排程挂起，待编排台决定换夜或排队</AlertTitle>
+          {suspendedSessions.map((session) => {
+            const target = targetById(session.targetId);
+            return (
+              <div key={session.id}>
+                {session.id}（{target?.name ?? '未知目标'}）：{session.suspensionReason ?? '待确认'}
+                {session.deficitMinutes && session.deficitMinutes > 0 ? `，还差 ${session.deficitMinutes} 分钟` : ''}
+              </div>
+            );
           })}
         </Alert>
       ) : null}

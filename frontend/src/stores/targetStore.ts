@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { db, deleteRow, persistRow } from '../hooks/usePersistentStore';
 import { uid } from '../utils/id';
-import type { FilterName, ObsTarget, Priority, TargetType } from '../types';
+import { TARGET_VERSION_FIELDS, type FilterName, type ObsTarget, type Priority, type TargetType } from '../types';
 
 export interface TargetInput {
   name: string;
@@ -23,7 +23,7 @@ interface TargetState {
   hydrated: boolean;
   hydrate: () => Promise<void>;
   addTarget: (input: TargetInput) => Promise<ObsTarget>;
-  updateTarget: (id: string, patch: Partial<TargetInput>) => Promise<void>;
+  updateTarget: (id: string, patch: Partial<TargetInput>) => Promise<{ target: ObsTarget; versionBumped: boolean }>;
   removeTarget: (id: string) => Promise<void>;
 }
 
@@ -51,6 +51,7 @@ export const useTargetStore = create<TargetState>()((set, get) => ({
       totalMinutes: Number(input.totalMinutes) || 0,
       priority: input.priority,
       minAltitude: Number(input.minAltitude) || 0,
+      version: 1,
       remark: input.remark?.trim() || undefined,
     };
     await persistRow('targets', target);
@@ -60,10 +61,17 @@ export const useTargetStore = create<TargetState>()((set, get) => ({
 
   updateTarget: async (id, patch) => {
     const current = get().targets.find((target) => target.id === id);
-    if (!current) return;
-    const next: ObsTarget = { ...current, ...patch };
+    if (!current) return { target: null as unknown as ObsTarget, versionBumped: false };
+    // 坐标或高度门槛变更时递增目标数据版本，排程段据此失效重算
+    const versionBumped = TARGET_VERSION_FIELDS.some((field) => field in patch && patch[field] !== current[field]);
+    const next: ObsTarget = {
+      ...current,
+      ...patch,
+      version: versionBumped ? current.version + 1 : current.version,
+    };
     await persistRow('targets', next);
     set({ targets: get().targets.map((target) => (target.id === id ? next : target)) });
+    return { target: next, versionBumped };
   },
 
   removeTarget: async (id) => {

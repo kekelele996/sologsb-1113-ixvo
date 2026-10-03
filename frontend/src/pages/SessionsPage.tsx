@@ -29,8 +29,10 @@ import { useSessionStore } from '../stores/sessionStore';
 import { useNightStore } from '../stores/nightStore';
 import { useTargetStore } from '../stores/targetStore';
 import { useEquipmentStore } from '../stores/equipmentStore';
-import { FILTER_NAMES, SESSION_STATUSES, type SessionStatus } from '../types';
+import SuspensionDialog from '../components/SuspensionDialog';
+import { FILTER_NAMES, SESSION_STATUSES, type SessionStatus, type ObsSession } from '../types';
 import { axisMinutes, durationMinutes, formatMinutes } from '../utils/astro';
+import { formatDeficit } from '../utils/version';
 
 interface SessionFormState {
   nightId: string;
@@ -53,6 +55,7 @@ export default function SessionsPage() {
   const updateSession = useSessionStore((s) => s.updateSession);
   const removeSession = useSessionStore((s) => s.removeSession);
   const rescheduleToBackup = useSessionStore((s) => s.rescheduleToBackup);
+  const markReviewed = useSessionStore((s) => s.markReviewed);
   const nights = useNightStore((s) => s.nights);
   const targets = useTargetStore((s) => s.targets);
   const telescopes = useEquipmentStore((s) => s.telescopes);
@@ -74,6 +77,8 @@ export default function SessionsPage() {
   const [rescheduleOpen, setRescheduleOpen] = useState(false);
   const [rescheduleNight, setRescheduleNight] = useState('');
   const [rescheduleReason, setRescheduleReason] = useState('');
+  const [suspensionOpen, setSuspensionOpen] = useState(false);
+  const [suspensionSession, setSuspensionSession] = useState<ObsSession | null>(null);
   const [form, setForm] = useState<SessionFormState>({
     nightId: '',
     targetId: '',
@@ -193,6 +198,11 @@ export default function SessionsPage() {
     setRescheduleReason('');
   }
 
+  function openSuspension(session: ObsSession) {
+    setSuspensionSession(session);
+    setSuspensionOpen(true);
+  }
+
   return (
     <Box>
       <Typography variant="h5" sx={{ mb: 0.5 }}>
@@ -303,7 +313,10 @@ export default function SessionsPage() {
                   <TableCell>{session.filterSlot}</TableCell>
                   <TableCell align="right">{session.plannedFrames}</TableCell>
                   <TableCell>
-                    <StatusChip status={session.status} />
+                    <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap">
+                      <StatusChip status={session.status} />
+                      {session.reviewed ? <Chip size="small" color="info" variant="outlined" label="已复核" /> : null}
+                    </Stack>
                   </TableCell>
                   <TableCell>
                     <ConflictBadge conflicts={conflicts} compact />
@@ -319,8 +332,26 @@ export default function SessionsPage() {
                     {session.backupNightId ? (
                       <Chip size="small" variant="outlined" label={`替补 ${nightById(session.backupNightId)?.date ?? session.backupNightId}`} sx={{ ml: 0.5 }} />
                     ) : null}
+                    {session.status === '挂起' ? (
+                      <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" sx={{ mt: 0.5 }}>
+                        <Chip size="small" color="warning" label={session.suspensionReason ?? '挂起'} />
+                        {session.deficitMinutes && session.deficitMinutes > 0 ? (
+                          <Chip size="small" variant="outlined" color="error" label={formatDeficit(session.deficitMinutes)} />
+                        ) : null}
+                      </Stack>
+                    ) : null}
                   </TableCell>
                   <TableCell align="right">
+                    {session.status === '挂起' ? (
+                      <Button size="small" color="warning" onClick={() => openSuspension(session)}>
+                        处理挂起
+                      </Button>
+                    ) : null}
+                    {!session.reviewed && session.status !== '已完成' ? (
+                      <Button size="small" color="info" onClick={() => void markReviewed(session.id)}>
+                        复核
+                      </Button>
+                    ) : null}
                     <Button size="small" onClick={() => openEdit(session.id)}>
                       编辑
                     </Button>
@@ -466,6 +497,13 @@ export default function SessionsPage() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <SuspensionDialog
+        open={suspensionOpen}
+        onClose={() => setSuspensionOpen(false)}
+        session={suspensionSession}
+        targetName={suspensionSession ? targetById(suspensionSession.targetId)?.name ?? '未知目标' : ''}
+      />
     </Box>
   );
 }

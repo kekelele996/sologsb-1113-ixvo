@@ -15,6 +15,7 @@ import Snackbar from '@mui/material/Snackbar';
 import { Link as RouterLink, Outlet, useLocation } from 'react-router-dom';
 import { buildNightPlanText, downloadText } from './utils/export';
 import { usePersistentStore } from './hooks/usePersistentStore';
+import { useVersionCheck } from './hooks/useVersionCheck';
 import { useNightStore } from './stores/nightStore';
 import { useSessionStore } from './stores/sessionStore';
 import { useTargetStore } from './stores/targetStore';
@@ -41,6 +42,7 @@ export default function App() {
   const telescopes = useEquipmentStore((s) => s.telescopes);
   const instruments = useEquipmentStore((s) => s.instruments);
   const [toast, setToast] = useState(false);
+  const { mismatches } = useVersionCheck();
 
   const night = nights.find((item) => item.id === currentNightId) ?? nights[0];
 
@@ -111,6 +113,12 @@ export default function App() {
         {error ? (
           <Alert severity="error" sx={{ mb: 2 }}>
             本地数据装载失败：{error}
+          </Alert>
+        ) : null}
+        {mismatches.length > 0 ? (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            检测到 {mismatches.length} 段排程与目标库在用版本不一致，已挂起等确认：
+            {mismatches.map((m) => ` ${m.sessionId}（${m.targetName}，快照 v${m.sessionVersion} → 当前 v${m.currentVersion < 0 ? '已删除' : m.currentVersion}）`).join('；')}
           </Alert>
         ) : null}
         {ready ? (

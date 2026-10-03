@@ -32,9 +32,15 @@ export interface ObsTarget {
   priority: Priority;
   /** 最小地平高度角阈值（度）：低于该值排程时自动标灰 */
   minAltitude: number;
+  /** 目标数据版本：坐标（赤经/赤纬）或高度门槛变更时递增，排程段据此核对在用版本 */
+  version: number;
   /** 备注 */
   remark?: string;
 }
+
+/** 触发排程段失效重算的目标字段（坐标或高度门槛） */
+export const TARGET_VERSION_FIELDS = ['raHours', 'decDeg', 'minAltitude'] as const;
+export type TargetVersionField = (typeof TARGET_VERSION_FIELDS)[number];
 
 export const TARGET_TYPES: TargetType[] = ['星系', '星云', '疏散星团', '行星', '月面'];
 export const PRIORITIES: Priority[] = ['P1', 'P2', 'P3'];
