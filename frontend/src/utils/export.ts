@@ -24,23 +24,28 @@ export function buildNightPlanText(context: PlanContext): string {
     }　云量预报：${night?.cloudText ?? '-'}`,
   );
   lines.push('-'.repeat(96));
-  lines.push('序 时段           目标            望远镜   终端            滤镜  帧数  状态      备注');
+  lines.push('序 时段           目标            望远镜   终端            滤镜  帧数  状态      版本  备注');
   const ordered = [...sessions].sort((a, b) => a.startTime.localeCompare(b.startTime));
   ordered.forEach((session, index) => {
     const target = targets.find((item) => item.id === session.targetId);
     const telescope = telescopes.find((item) => item.id === session.telescopeId);
     const instrument = instruments.find((item) => item.id === session.instrumentId);
+    const note =
+      session.status === '排队'
+        ? `${session.rescheduleReason ?? ''}（拟转 ${session.queueNightId ?? '-'}，还差 ${session.queueShortfallMinutes ?? 0} 分钟）`
+        : session.suspendReason ?? session.rescheduleReason ?? '';
     lines.push(
       [
         pad(index + 1),
         `${session.startTime}-${session.endTime}`.padEnd(14, ' '),
-        `${target?.name ?? '未知目标'}（${target?.catalog ?? '-'}）`.padEnd(24, ' '),
+        `${target?.name ?? '未知目标'}（${target?.catalog ?? '-'}）`.padEnd(24, ''),
         (telescope?.code ?? '-').padEnd(8, ' '),
         (instrument?.model ?? '-').padEnd(16, ' '),
         session.filterSlot.padEnd(6, ' '),
         pad(session.plannedFrames, 4),
         session.status.padEnd(8, ' '),
-        session.rescheduleReason ?? '',
+        `v${session.targetVersion ?? '?'}/${target ? `v${target.dataVersion}` : '?'}`,
+        note,
       ].join(' '),
     );
   });
@@ -58,7 +63,7 @@ export function buildNightPlanText(context: PlanContext): string {
 /** 生成 CSV */
 export function buildPlanCsv(context: PlanContext): string {
   const { sessions, targets, telescopes, instruments } = context;
-  const header = ['观测夜', '时段', '目标名', '星表编号', '类型', '视星等', '望远镜', '终端', '滤镜', '帧数', '单帧曝光(s)', '状态', '改期原因'];
+  const header = ['观测夜', '时段', '目标名', '星表编号', '类型', '视星等', '望远镜', '终端', '滤镜', '帧数', '单帧曝光(s)', '状态', '排程版本', '目标版本', '排队目标夜', '缺口分钟', '挂起/改期原因'];
   const rows = [...sessions]
     .sort((a, b) => a.startTime.localeCompare(b.startTime))
     .map((session) => {
@@ -78,7 +83,11 @@ export function buildPlanCsv(context: PlanContext): string {
         String(session.plannedFrames),
         target ? String(target.exposureSec) : '',
         session.status,
-        session.rescheduleReason ?? '',
+        session.targetVersion !== undefined ? String(session.targetVersion) : '',
+        target ? String(target.dataVersion) : '',
+        session.queueNightId ?? '',
+        session.queueShortfallMinutes !== undefined ? String(session.queueShortfallMinutes) : '',
+        session.suspendReason ?? session.rescheduleReason ?? '',
       ];
     });
   const csv = [header, ...rows]

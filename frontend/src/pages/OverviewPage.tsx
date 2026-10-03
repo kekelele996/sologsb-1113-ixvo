@@ -20,6 +20,7 @@ import { useTargetStore } from '../stores/targetStore';
 import { useEquipmentStore } from '../stores/equipmentStore';
 import { NIGHT_TOTAL_MINUTES, TARGET_COLOR } from '../types';
 import { altitudeAt, axisMinutes, isBelowThreshold, minutesToTime, moonBrightnessFactor, moonConflict, moonPhaseText, timelineTicks } from '../utils/astro';
+import { freeCapacity, sessionVersionState } from '../utils/scheduling';
 
 /** 本夜编排总览：30 分钟刻度时间轴 + 月相与月出月落条带 + 冲突与标灰提示 */
 export default function OverviewPage() {
@@ -68,10 +69,14 @@ export default function OverviewPage() {
           endMinute,
           label: `${target?.name ?? '未知目标'} · ${telescopeById(session.telescopeId)?.code ?? '-'}`,
           color: target ? TARGET_COLOR[target.type] : '#607d8b',
-          dimmed: session.status === '因云取消' || Boolean(altitude?.below),
+          // 因云取消 / 挂起 直接标灰；排队半透明；高度不达标标灰
+          dimmed: session.status === '因云取消' || session.status === '挂起' || Boolean(altitude?.below),
+          opacity: session.status === '排队' ? 0.55 : undefined,
           tooltip: `${session.startTime}-${session.endTime} ${target?.name ?? ''}｜${telescopeById(session.telescopeId)?.code ?? '-'} / ${
             instrumentById(session.instrumentId)?.model ?? '-'
-          }｜${session.filterSlot}｜${session.plannedFrames} 帧｜${session.status}｜评估高度角 ${altitude?.altitude ?? '-'}°`,
+          }｜${session.filterSlot}｜${session.plannedFrames} 帧｜${session.status}${
+            session.status === '排队' ? `｜排队转 ${nights.find((item) => item.id === session.queueNightId)?.date ?? session.queueNightId ?? '-'}，还差 ${session.queueShortfallMinutes ?? 0} 分钟` : ''
+          }${session.suspendReason ? `｜挂起：${session.suspendReason}` : ''}｜评估高度角 ${altitude?.altitude ?? '-'}°`,
         };
       }),
     [nightSessions, targets, altitudes, telescopes, instruments],
@@ -90,6 +95,15 @@ export default function OverviewPage() {
         .filter((item): item is { target: NonNullable<ReturnType<typeof targetById>>; text: string } => Boolean(item && item.text)),
     [nightSessions, targets, night?.moonPhasePct],
   );
+
+  /** 挂起段（版本对不上 / 复核不达标）与排队段（目标夜容量不足，记录缺口） */
+  const heldSessions = useMemo(() => nightSessions.filter((session) => session.status === '挂起'), [nightSessions]);
+  const queuedSessions = useMemo(() => nightSessions.filter((session) => session.status === '排队'), [nightSessions]);
+  const staleSessions = useMemo(
+    () => nightSessions.filter((session) => sessionVersionState(session, targetById(session.targetId)) !== 'match'),
+    [nightSessions, targets],
+  );
+  const nightFree = night ? freeCapacity(night, sessions) : 0;
 
   if (!night) {
     return <Alert severity="info">暂无观测夜数据</Alert>;
@@ -116,6 +130,7 @@ export default function OverviewPage() {
           ))}
         </TextField>
         <Chip label={`值班人 ${night.dutyOfficer}`} size="small" />
+        <Chip label={`可排容量 余 ${nightFree}/${night.capacityMinutes ?? 600} 分钟`} size="small" color="secondary" variant="outlined" />
         <Chip label={`月相 ${night.moonPhasePct}%（${moonPhaseText(night.moonPhasePct)}）· 亮度折算 ${moonBrightnessFactor(night.moonPhasePct)}`} size="small" color="primary" variant="outlined" />
         <ConflictBadge conflicts={conflicts} />
       </Stack>
@@ -157,6 +172,26 @@ export default function OverviewPage() {
             </Typography>
           </CardContent>
         </Card>
+        <Card variant="outlined">
+          <CardContent>
+            <Typography variant="caption" color="text.secondary">
+              挂起待编排台处理
+            </Typography>
+            <Typography variant="h5" color={heldSessions.length ? 'warning.main' : 'success.main'}>
+              {heldSessions.length}
+            </Typography>
+          </CardContent>
+        </Card>
+        <Card variant="outlined">
+          <CardContent>
+            <Typography variant="caption" color="text.secondary">
+              排队（容量不足）
+            </Typography>
+            <Typography variant="h5" color={queuedSessions.length ? 'info.main' : 'success.main'}>
+              {queuedSessions.length}
+            </Typography>
+          </CardContent>
+        </Card>
       </Box>
 
       {conflicts.length > 0 ? (
@@ -191,6 +226,37 @@ export default function OverviewPage() {
           {moonConflicts.map((item) => (
             <div key={item.target.id}>{item.text}</div>
           ))}
+        </Alert>
+      ) : null}
+
+      {staleSessions.length > 0 ? (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          <AlertTitle>排程段与目标库在用版本对不上，已挂起等编排台核对</AlertTitle>
+          {staleSessions.map((session) => {
+            const target = targetById(session.targetId);
+            return (
+              <div key={session.id}>
+                {session.id} · {target?.name ?? '未知目标'}：排程快照 v{session.targetVersion ?? '?'}，目标库现用 v{target?.dataVersion ?? '?'}
+                {session.suspendReason ? `｜${session.suspendReason}` : ''}
+              </div>
+            );
+          })}
+        </Alert>
+      ) : null}
+
+      {queuedSessions.length > 0 ? (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          <AlertTitle>换夜容量不足，以下排程段在排队</AlertTitle>
+          {queuedSessions.map((session) => {
+            const target = targetById(session.targetId);
+            const targetNight = nights.find((item) => item.id === session.queueNightId);
+            return (
+              <div key={session.id}>
+                {session.id} · {target?.name ?? '未知目标'}：拟转 {targetNight?.date ?? session.queueNightId ?? '?'}，还差 {session.queueShortfallMinutes ?? 0} 分钟
+                {session.rescheduleReason ? `｜${session.rescheduleReason}` : ''}
+              </div>
+            );
+          })}
         </Alert>
       ) : null}
 
@@ -261,8 +327,16 @@ export default function OverviewPage() {
                       <Chip size="small" variant="outlined" label={`${session.plannedFrames} 帧 × ${target?.exposureSec ?? '-'}s`} />
                       <StatusChip status={session.status} />
                       {ids.has(session.id) ? <Chip size="small" color="error" label="时段冲突" /> : null}
+                      {session.status === '挂起' ? <Chip size="small" color="warning" label={session.suspendReason ?? '挂起待确认'} /> : null}
+                      {session.status === '排队' ? (
+                        <Chip
+                          size="small"
+                          color="info"
+                          label={`排队转 ${nights.find((item) => item.id === session.queueNightId)?.date ?? session.queueNightId ?? '-'}，还差 ${session.queueShortfallMinutes ?? 0} 分钟`}
+                        />
+                      ) : null}
                       {altitude?.below ? <Chip size="small" color="warning" label={`高度角 ${altitude.altitude}° 低于阈值 ${target?.minAltitude}°`} /> : <Chip size="small" color="success" variant="outlined" label={`高度角 ${altitude?.altitude ?? '-'}°`} />}
-                      {session.rescheduleReason ? <Typography variant="caption" color="text.secondary">{session.rescheduleReason}</Typography> : null}
+                      {session.rescheduleReason && session.status !== '排队' ? <Typography variant="caption" color="text.secondary">{session.rescheduleReason}</Typography> : null}
                     </Stack>
                   </CardContent>
                 </Card>

@@ -14,6 +14,8 @@ export interface TimelineBar {
   color: string;
   tooltip?: string;
   dimmed?: boolean;
+  /** 自定义不透明度（排队段半透明提示） */
+  opacity?: number;
 }
 
 export interface TimelineProps {
@@ -102,7 +104,7 @@ export default function Timeline({
                     px: 0.75,
                     py: 0.5,
                     cursor: onBarClick ? 'pointer' : 'default',
-                    opacity: bar.dimmed ? 0.42 : 1,
+                    opacity: bar.opacity ?? (bar.dimmed ? 0.42 : 1),
                     border: conflict ? '2px solid' : '1px solid rgba(255,255,255,.35)',
                     borderColor: conflict ? 'error.dark' : undefined,
                     overflow: 'hidden',

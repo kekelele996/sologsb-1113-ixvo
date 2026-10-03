@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { db, deleteRow, persistRow } from '../hooks/usePersistentStore';
+import { db, DEFAULT_NIGHT_CAPACITY_MINUTES, deleteRow, persistRow } from '../hooks/usePersistentStore';
 import { uid } from '../utils/id';
 import type { ObsNight } from '../types';
 
@@ -16,6 +16,7 @@ export interface NightInput {
   cloudText: string;
   primary: boolean;
   backup: boolean;
+  capacityMinutes?: number;
   dutyOfficer: string;
   remark?: string;
 }
@@ -60,6 +61,7 @@ export const useNightStore = create<NightState>()((set, get) => ({
       cloudText: input.cloudText,
       primary: input.primary,
       backup: input.backup,
+      capacityMinutes: Number(input.capacityMinutes) || DEFAULT_NIGHT_CAPACITY_MINUTES,
       dutyOfficer: input.dutyOfficer.trim(),
       remark: input.remark?.trim() || undefined,
     };

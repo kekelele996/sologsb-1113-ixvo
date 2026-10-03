@@ -25,6 +25,8 @@ export interface ObsNight {
   primary: boolean;
   /** 备用夜标记 */
   backup: boolean;
+  /** 当夜可排容量（分钟）：换到该夜的排程段累计超出即转排队 */
+  capacityMinutes: number;
   /** 值班人 */
   dutyOfficer: string;
   /** 备注 */

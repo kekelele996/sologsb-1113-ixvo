@@ -2,6 +2,8 @@ import { useCallback } from 'react';
 import { useSessionStore } from '../stores/sessionStore';
 import type { ConflictItem, ObsSession } from '../types';
 import { overlapMinutes } from '../utils/astro';
+import { isActiveStatus } from '../utils/scheduling';
+import { SCHEMA_VERSION } from './usePersistentStore';
 
 export interface ConflictCheckInput {
   nightId: string;
@@ -23,6 +25,10 @@ export interface ConflictCheckApi {
 
 function describe(a: ObsSession, b: ObsSession): ConflictItem | null {
   if (a.nightId !== b.nightId || a.telescopeId !== b.telescopeId || a.id === b.id) {
+    return null;
+  }
+  // 挂起 / 排队 / 因云取消 / 已完成的段不占设备时段，不参与冲突
+  if (!isActiveStatus(a.status) || !isActiveStatus(b.status)) {
     return null;
   }
   const overlap = overlapMinutes(a.startTime, a.endTime, b.startTime, b.endTime);
@@ -50,6 +56,7 @@ export function useConflictCheck(): ConflictCheckApi {
         id: input.ignoreSessionId ?? '__candidate__',
         nightId: input.nightId,
         targetId: '',
+        targetVersion: 1,
         startTime: input.startTime,
         endTime: input.endTime,
         telescopeId: input.telescopeId,
@@ -57,7 +64,7 @@ export function useConflictCheck(): ConflictCheckApi {
         filterSlot: '',
         plannedFrames: 0,
         status: '待执行',
-        schemaVersion: 2,
+        schemaVersion: SCHEMA_VERSION,
       };
       return sessions
         .filter((session) => session.id !== input.ignoreSessionId)

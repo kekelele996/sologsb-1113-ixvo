@@ -128,13 +128,30 @@ export default function TargetsPage() {
       return;
     }
     if (editingId) {
-      await updateTarget(editingId, form);
-      setNotice(`已更新目标 ${form.name}`);
+      const result = await updateTarget(editingId, form);
+      if (result?.schedulingChanged) {
+        setNotice(
+          `已更新目标 ${form.name}，数据版本升至 v${result.target.dataVersion}：编排台 ${result.suspendedCount} 个在途排程段已按新数据失效重算并挂起，由编排台核对或换夜（评审组不删段）`,
+        );
+      } else {
+        setNotice(`已更新目标 ${form.name}（坐标 / 高度门槛未变，数据版本维持 v${result?.target.dataVersion ?? 1}）`);
+      }
     } else {
-      await addTarget(form);
-      setNotice(`已新增目标 ${form.name}`);
+      const target = await addTarget(form);
+      setNotice(`已新增目标 ${form.name}，数据版本 v${target.dataVersion}`);
     }
     setDialogOpen(false);
+  }
+
+  function askRemove(target: ObsTarget) {
+    // 评审组不替编排台删段：只从目标库移除，编排台相关段保留并在版本核对时按目标缺失挂起
+    if (
+      window.confirm(
+        `删除目标 ${target.name} 只会从评审组目标库移除，编排台已排的段不会被删除：这些段核对时会因目标缺失挂起等确认。确认删除？`,
+      )
+    ) {
+      void removeTarget(target.id).then(() => setNotice(`已从目标库删除 ${target.name}（编排台排程段保留）`));
+    }
   }
 
   return (
@@ -143,7 +160,7 @@ export default function TargetsPage() {
         观测目标库
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        维护目标星表、视星等、推荐滤镜与曝光参数；地平高度阈值用于判断排程时是否标灰（评估时刻：夜间 22:00）。
+        维护目标星表、视星等、推荐滤镜与曝光参数；地平高度阈值用于判断排程时是否标灰（评估时刻：夜间 22:00）。修改赤经 / 赤纬 / 高度门槛会令数据版本 +1，编排台在用排程段随即失效挂起重算，本页不会删除或回写任何排程段。
       </Typography>
 
       {notice ? (
@@ -189,7 +206,7 @@ export default function TargetsPage() {
               <TableCell>滤镜 / 曝光</TableCell>
               <TableCell align="right">阈值(°)</TableCell>
               <TableCell>本夜可见窗口</TableCell>
-              <TableCell>优先级</TableCell>
+              <TableCell>优先级 / 版本</TableCell>
               <TableCell align="right">操作</TableCell>
             </TableRow>
           </TableHead>
@@ -232,13 +249,16 @@ export default function TargetsPage() {
                     )}
                   </TableCell>
                   <TableCell>
-                    <Chip size="small" color={target.priority === 'P1' ? 'error' : target.priority === 'P2' ? 'warning' : 'default'} label={target.priority} />
+                    <Stack direction="row" spacing={0.5} alignItems="center">
+                      <Chip size="small" color={target.priority === 'P1' ? 'error' : target.priority === 'P2' ? 'warning' : 'default'} label={target.priority} />
+                      <Chip size="small" variant="outlined" color="secondary" label={`数据 v${target.dataVersion}`} />
+                    </Stack>
                   </TableCell>
                   <TableCell align="right">
                     <Button size="small" onClick={() => openEdit(target)}>
                       编辑
                     </Button>
-                    <Button size="small" color="error" onClick={() => void removeTarget(target.id)}>
+                    <Button size="small" color="error" onClick={() => askRemove(target)}>
                       删除
                     </Button>
                   </TableCell>
@@ -263,10 +283,10 @@ export default function TargetsPage() {
           <FieldRow label="星表编号">
             <TextField size="small" fullWidth value={form.catalog} onChange={(event) => setForm({ ...form, catalog: event.target.value })} placeholder="如：NGC 224" />
           </FieldRow>
-          <FieldRow label="赤经(小时)" required hint="0~24">
+          <FieldRow label="赤经(小时)" required hint="0~24；改动坐标会令数据版本 +1">
             <TextField size="small" type="number" fullWidth value={form.raHours} onChange={(event) => setForm({ ...form, raHours: Number(event.target.value) })} />
           </FieldRow>
-          <FieldRow label="赤纬(度)" required hint="-90~90">
+          <FieldRow label="赤纬(度)" required hint="-90~90；改动坐标会令数据版本 +1">
             <TextField size="small" type="number" fullWidth value={form.decDeg} onChange={(event) => setForm({ ...form, decDeg: Number(event.target.value) })} />
           </FieldRow>
           <FieldRow label="视星等" required>
@@ -305,7 +325,7 @@ export default function TargetsPage() {
               ))}
             </TextField>
           </FieldRow>
-          <FieldRow label="最小地平高度(°)" required hint="低于该值排程时自动标灰">
+          <FieldRow label="最小地平高度(°)" required hint="低于该值排程时自动标灰；改动会令数据版本 +1 并打回编排台在途段">
             <TextField size="small" type="number" fullWidth value={form.minAltitude} onChange={(event) => setForm({ ...form, minAltitude: Number(event.target.value) })} />
           </FieldRow>
           <FieldRow label="备注">

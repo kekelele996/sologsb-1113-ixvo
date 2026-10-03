@@ -32,6 +32,8 @@ export interface ObsTarget {
   priority: Priority;
   /** 最小地平高度角阈值（度）：低于该值排程时自动标灰 */
   minAltitude: number;
+  /** 目标数据版本：评审组每改一次坐标或高度门槛即 +1，编排台按目标编号与之核对 */
+  dataVersion: number;
   /** 备注 */
   remark?: string;
 }
